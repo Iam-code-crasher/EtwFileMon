@@ -3,27 +3,27 @@
 
 #define NOMINMAX
 #define INITGUID
-#include <windows.h>
-#include <evntrace.h>
-#include <evntcons.h>
+
+#include "CommonEtwStructs.h"
 #include <iostream>
 #include <fstream>
 #include <iomanip>  // For formatting
-#include <wchar.h>  // For working with wide character strings
+
 #pragma comment (lib, "shell32.lib")
 #pragma comment (lib, "advapi32.lib")
 
 #include <stdio.h>
 #include <stdint.h>
-#include <string.h>
 #include <thread>
 #include <string>
 #include <sstream>  // For string stream
 #include <map>
+#include <string>
+#include <algorithm> // for std::transform
+#include <cctype>    // for ::tolower or ::towlower (wide characters)
 
 // Global map to store the mapping between FileObject and file path
 std::map<uint64_t, std::wstring> fileObjectToPathMap;
-
 
 static const GUID FileIoGuid = { 0x90cbdc39, 0x4a3e, 0x11d1, { 0x84, 0xf4, 0x00, 0x00, 0xf8, 0x04, 0x64, 0xe3 } };
 static const GUID PerfInfoGuid = { 0xce1dbfb4, 0x137e, 0x4da6, { 0x87, 0xb0, 0x3f, 0x59, 0xaa, 0x10, 0x2c, 0xbc } };
@@ -40,17 +40,12 @@ static const GUID PerfInfoGuid = { 0xce1dbfb4, 0x137e, 0x4da6, { 0x87, 0xb0, 0x3
 #define PERFINFO_LOG_TYPE_FILE_IO_RENAME             0x47
 
 
-// structures from "C:\Program Files (x86)\Windows Kits\10\Include\10.0.19041.0\km\wmicore.mof" (in Windows DDK)
-struct FileIo_Create
-{
-    uint64_t IrpPtr;
-    uint64_t FileObject;
-    uint32_t TTID;
-    uint32_t CreateOptions;
-    uint32_t FileAttributes;
-    uint32_t ShareAccess;
-    wchar_t OpenPath[1000];
-};
+static TRACEHANDLE gTraceHandle;
+static HANDLE gTraceThread;
+static DWORD gProcessFilter;
+
+// Global variables for filtering
+std::wstring gDirectoryFilter;
 
 struct
 {
@@ -58,13 +53,6 @@ struct
     WCHAR SessionName[1024];
 }
 static gTrace;
-
-static TRACEHANDLE gTraceHandle;
-static HANDLE gTraceThread;
-static DWORD gProcessFilter;
-
-// Global variables for filtering
-std::wstring gDirectoryFilter;
 
 // Function to read configuration (pid and directory) from a file
 bool ReadConfig(const std::string& configFilePath) {
@@ -160,34 +148,6 @@ std::wstring ConvertNtPathToDosPath(const std::wstring& ntPath) {
     return dosPath; // Return the converted DOS path
 }
 
-struct FileIo_Read {
-    uint64_t IrpPtr;
-    uint64_t FileObject;
-    uint32_t TTID;
-    uint32_t Length;
-    uint64_t Offset;
-};
-
-struct FileIo_Write {
-    uint64_t IrpPtr;
-    uint64_t FileObject;
-    uint32_t TTID;
-    uint32_t Length;
-    uint64_t Offset;
-};
-
-struct FileIo_Delete {
-    uint64_t IrpPtr;
-    uint64_t FileObject;
-    uint32_t TTID;
-};
-
-struct FileIo_Rename {
-    uint64_t IrpPtr;
-    uint64_t FileObject;
-    uint32_t TTID;
-    wchar_t NewName[1000];
-};
 
 // Function to log events
 void WriteToLog(uint64_t IrpPtr, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
@@ -206,19 +166,51 @@ void WriteToLog(uint64_t IrpPtr, uint64_t FileObject, const std::wstring& filePa
     logFile.close();
 }
 
+// Function to check if a given path is under the monitored directory
+bool isPathMonitored(const std::wstring& path) {
+    // Ensure both the path and the directory filter are in the same case (lowercase)
+    std::wstring lowerPath = path;
+    std::wstring lowerDirectoryFilter = gDirectoryFilter;
+
+    // Convert both strings to lowercase to ensure case-insensitive comparison
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+    std::transform(lowerDirectoryFilter.begin(), lowerDirectoryFilter.end(), lowerDirectoryFilter.begin(), ::towlower);
+
+    // Check if the monitored directory is a prefix of the path
+    return lowerPath.find(lowerDirectoryFilter) == 0;
+}
+
 // Function to handle File Create events
 void HandleFileCreate(EVENT_RECORD* event) {
-    struct FileIo_Create* data = (FileIo_Create*)event->UserData;
+    const UCHAR version = event->EventHeader.EventDescriptor.Version;
 
-    // Convert NT path to DOS path
-    std::wstring ntPath(data->OpenPath);
-    std::wstring dosPath = ConvertNtPathToDosPath(ntPath);
+    // Lambda function to handle common code for file creation
+    auto handleCreateEvent = [&](const auto* data) {
+        const std::wstring ntPath(data->OpenPath);
+        const std::wstring dosPath = ConvertNtPathToDosPath(ntPath);
+        if (!isPathMonitored(dosPath)) {
+            return;
+        }
 
-    // Store the path in the map using FileObject as the key
-    fileObjectToPathMap[data->IrpPtr] = dosPath;
+        // Use std::unique_ptr if dynamic memory allocation is needed later
+        // Example: std::unique_ptr<std::wstring> dosPathPtr = std::make_unique<std::wstring>(dosPath);
 
-    // Log the file creation event
-    WriteToLog(data->IrpPtr, data->FileObject, dosPath, "Create");
+        // Store the path in the map using IrpPtr as the key
+        fileObjectToPathMap[data->IrpPtr] = dosPath;
+
+        // Log the file creation event
+        WriteToLog(data->IrpPtr, data->FileObject, dosPath, "Create");
+    };
+
+    // Handle based on version
+    if (version >= 3) {
+        const auto* data = static_cast<PFILEIO_V3_CREATE>(event->UserData);
+        handleCreateEvent(data);
+    }
+    else {
+        const auto* data = static_cast<PFILEIO_V2_CREATE>(event->UserData);
+        handleCreateEvent(data);
+    }
 }
 
 // Function to handle File Read events
@@ -286,7 +278,7 @@ void HandleFileRename(EVENT_RECORD* event) {
 
 // Function to handle File Close events
 void HandleFileClose(EVENT_RECORD* event) {
-    uint64_t fileObject = ((struct FileIo_Create*)event->UserData)->FileObject;
+    uint64_t fileObject = ((PFILEIO_V3_CREATE)event->UserData)->FileObject;
 
     // Remove the fileObject from the map
     fileObjectToPathMap.erase(fileObject);
