@@ -1,1 +1,2 @@
 C:\Users\Praveen Patel\source\repos\EtwFileMonitor\Debug\EtwFileMonitor.exe
+C:\Users\Praveen Patel\source\repos\workspace\EtwFileMon\EtwFileMonitor\Debug\EtwFileMonitor.exe

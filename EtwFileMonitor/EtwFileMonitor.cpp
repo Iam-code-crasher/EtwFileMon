@@ -21,6 +21,9 @@
 #include <string>
 #include <algorithm> // for std::transform
 #include <cctype>    // for ::tolower or ::towlower (wide characters)
+#include <thread>
+#include <memory>
+
 
 // Global map to store the mapping between FileObject and file path
 std::map<uint64_t, std::wstring> fileObjectToPathMap;
@@ -41,7 +44,6 @@ static const GUID PerfInfoGuid = { 0xce1dbfb4, 0x137e, 0x4da6, { 0x87, 0xb0, 0x3
 
 
 static TRACEHANDLE gTraceHandle;
-static HANDLE gTraceThread;
 static DWORD gProcessFilter;
 
 // Global variables for filtering
@@ -83,7 +85,7 @@ static BOOL IsElevated(void)
     HANDLE token;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
     {
-        TOKEN_ELEVATION elevation;
+        TOKEN_ELEVATION elevation{};
         DWORD size;
         if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size))
         {
@@ -106,7 +108,7 @@ static BOOL EnableProfilePrivilge(void)
         LUID luid;
         if (LookupPrivilegeValue(NULL, SE_SYSTEM_PROFILE_NAME, &luid))
         {
-            TOKEN_PRIVILEGES tp;
+            TOKEN_PRIVILEGES tp{};
             {
                 tp.PrivilegeCount = 1;
                 tp.Privileges[0].Luid = luid;
@@ -313,10 +315,15 @@ static void WINAPI TraceEventRecordCallback(EVENT_RECORD* event) {
     }
 }
 
-static DWORD WINAPI TraceProcessThread(LPVOID arg)
-{
-    ProcessTrace(&gTraceHandle, 1, NULL, NULL);
-    return 0;
+// Global flag to stop the trace thread
+std::atomic<bool> stopTraceThread(false);
+std::thread traceThread;
+
+void TraceProcessThread() {
+    // Check the stop condition in a loop or rely on ProcessTrace itself being interruptible
+    while (!stopTraceThread.load()) {
+        ProcessTrace(&gTraceHandle, 1, NULL, NULL);
+    }
 }
 
 static BOOL StartTraceSession()
@@ -371,59 +378,63 @@ static BOOL StartTraceSession()
     catch (...) {
 
     }
-    // start processing in background thread
-    gTraceThread = CreateThread(NULL, 0, TraceProcessThread, NULL, 0, NULL);
-    if (gTraceThread == NULL)
-    {
-        ControlTraceW(0, KERNEL_LOGGER_NAMEW, p, EVENT_TRACE_CONTROL_STOP);
-        CloseTrace(gTraceHandle);
-        return FALSE;
-    }
+    // start processing in background thread using std::thread
+    traceThread = std::thread([]() {
+        TraceProcessThread(); // Call the trace processing function
+        });
 
-    return TRUE;
+    // Get the native handle of the thread to use with WaitForSingleObject
+    HANDLE threadHandle = traceThread.native_handle();
+
+    // If you want the thread to block and wait, join it
+    traceThread.join(); // This makes the thread blocking
+    return true;
 }
 
 static void StopTraceSession(void)
 {
-    // stop the trace
+    // Signal the trace thread to stop
+    stopTraceThread.store(true);
+
+    // Stop the ETW trace session
     ControlTraceW(0, KERNEL_LOGGER_NAMEW, &gTrace.Properties, EVENT_TRACE_CONTROL_STOP);
 
-    // close processing loop, this will wait until all pending buffers are flushed
-    // and TraceEventRecordCallback called on all pending events in buffers
-    CloseTrace(gTraceHandle);
+    // Wait for the trace thread to finish (join it)
+    if (traceThread.joinable()) {
+        traceThread.join(); // Wait for the thread to complete
+    }
 
-    // wait for processing thread to finish
-    WaitForSingleObject(gTraceThread, INFINITE);
+    // Close the trace handle
+    CloseTrace(gTraceHandle);
 }
 
-int main()
-{
-    // Read the configuration file before starting the trace
-    if (!ReadConfig("config.txt")) {
-        return 1; // Exit if configuration fails
+int main(int argc, char* argv[]) {
+    if (argc > 1) {
+        std::string arg = argv[1];
+
+        if (arg == "--start") {
+            std::cout << "Stopping any existing session and starting a new session...\n";
+            if (StartTraceSession()) {
+                std::cout << "Trace session started successfully.\n";
+            }
+            else {
+                std::cerr << "Failed to start the trace session.\n";
+                return 1;  // Return an error code if the trace session fails to start
+            }
+        }
+        else if (arg == "--stop") {
+            std::cout << "Stopping the trace session...\n";
+            StopTraceSession();
+            std::cout << "Trace session stopped successfully.\n";
+        }
+        else {
+            std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
+            return 1;
+        }
     }
-
-    if (!IsElevated())
-    {
-        fprintf(stderr, "Using ETW with NT kernel logger requires elevated process!\n");
-        exit(EXIT_FAILURE);
+    else {
+        std::cerr << "No argument provided. Use --start or --stop.\n";
+        return 1;
     }
-
-    if (!EnableProfilePrivilge())
-    {
-        fprintf(stderr, "Cannot enable profiling privilege for process!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (!StartTraceSession())
-    {
-        fprintf(stderr, "Cannot start ETW session for NT kernel logger!\n");
-        exit(EXIT_FAILURE);
-    }
-    getchar();
-
-    printf("Stopping...\n");
-    StopTraceSession();
-
-    printf("Done!\n");
+    return 0;
 }
