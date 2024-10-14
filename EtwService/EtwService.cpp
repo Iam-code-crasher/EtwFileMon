@@ -103,7 +103,7 @@ void InstallService() {
     }
 
     // Get the directory of the service executable and build the path to the monitoring executable
-    std::wstring exePath = L"\"" + GetExecutableDirectory() + L"\\EtwFileMonitor.exe\"" + L"--start";
+    std::wstring exePath = L"\"" + GetExecutableDirectory() + L"\\EtwFileMonitor.exe" + L" --start\"";
 
     SC_HANDLE hService = CreateService(
         hSCManager,                  // SCM database

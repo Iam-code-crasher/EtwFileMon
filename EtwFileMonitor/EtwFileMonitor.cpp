@@ -23,7 +23,8 @@
 #include <cctype>    // for ::tolower or ::towlower (wide characters)
 #include <thread>
 #include <memory>
-
+#include <Wtsapi32.h>
+#pragma comment( lib, "Wtsapi32.lib" )
 
 // Global map to store the mapping between FileObject and file path
 std::map<uint64_t, std::wstring> fileObjectToPathMap;
@@ -49,6 +50,10 @@ static DWORD gProcessFilter;
 // Global variables for filtering
 std::wstring gDirectoryFilter;
 
+// Global flag to stop the trace thread
+std::atomic<bool> stopTraceThread(false);
+std::thread traceThread;
+
 struct
 {
     EVENT_TRACE_PROPERTIES Properties;
@@ -60,7 +65,7 @@ static gTrace;
 bool ReadConfig(const std::string& configFilePath) {
     std::ifstream configFile(configFilePath);
     if (!configFile.is_open()) {
-        std::cerr << "Error: Could not open configuration file!" << std::endl;
+        //std::cerr << "Error: Could not open configuration file!" << std::endl;
         return false;
     }
 
@@ -152,14 +157,16 @@ std::wstring ConvertNtPathToDosPath(const std::wstring& ntPath) {
 
 
 // Function to log events
-void WriteToLog(uint64_t IrpPtr, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
+void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
     std::ofstream logFile("EtwFileMonitor.log", std::ios_base::app);
     if (!logFile.is_open()) {
         std::cerr << "Error: Could not open log file!" << std::endl;
         return;
     }
 
-    logFile << "Operation: " << operation
+    logFile << "PID:" << pid
+        << ", Event Time: " << eventtime
+        << ", Operation: " << operation
         << ", File Path: " << std::string(filePath.begin(), filePath.end())
         << ", Length: " << length
         << ", Offset: " << offset
@@ -181,6 +188,15 @@ bool isPathMonitored(const std::wstring& path) {
     // Check if the monitored directory is a prefix of the path
     return lowerPath.find(lowerDirectoryFilter) == 0;
 }
+// Number of 100-nanosecond intervals between January 1, 1601 and January 1, 1970
+#define EPOCH_DIFFERENCE 11644473600LL
+
+// Function to convert FILETIME to Unix Epoch Time (seconds since 1970)
+time_t FileTimeToEpoch(const LARGE_INTEGER& fileTime) {
+    // Convert the timestamp from 100-nanosecond intervals to seconds
+    time_t epochTime = (fileTime.QuadPart / 10000000LL) - EPOCH_DIFFERENCE;
+    return epochTime;
+}
 
 // Function to handle File Create events
 void HandleFileCreate(EVENT_RECORD* event) {
@@ -201,7 +217,7 @@ void HandleFileCreate(EVENT_RECORD* event) {
         fileObjectToPathMap[data->IrpPtr] = dosPath;
 
         // Log the file creation event
-        WriteToLog(data->IrpPtr, data->FileObject, dosPath, "Create");
+        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, dosPath, "Create");
     };
 
     // Handle based on version
@@ -225,7 +241,7 @@ void HandleFileRead(EVENT_RECORD* event) {
         std::wstring filePath = it->second;
 
         // Log the read event
-        WriteToLog(data->IrpPtr, data->FileObject, filePath, "Read", data->Length, data->Offset);
+        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Read", data->Length, data->Offset);
     }
 }
 
@@ -239,7 +255,7 @@ void HandleFileWrite(EVENT_RECORD* event) {
         std::wstring filePath = it->second;
 
         // Log the write event
-        WriteToLog(data->IrpPtr, data->FileObject, filePath, "Write", data->Length, data->Offset);
+        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Write", data->Length, data->Offset);
     }
 }
 
@@ -253,7 +269,7 @@ void HandleFileDelete(EVENT_RECORD* event) {
         std::wstring filePath = it->second;
 
         // Log the delete event
-        WriteToLog(data->IrpPtr, data->FileObject, filePath, "Delete");
+        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Delete");
 
         // Remove the fileObject from the map
         fileObjectToPathMap.erase(it);
@@ -271,7 +287,7 @@ void HandleFileRename(EVENT_RECORD* event) {
         std::wstring newFilePath = ConvertNtPathToDosPath(data->NewName);
 
         // Log the rename event
-        WriteToLog(data->IrpPtr, data->FileObject, oldFilePath, "Rename to " + std::string(newFilePath.begin(), newFilePath.end()));
+        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, oldFilePath, "Rename to " + std::string(newFilePath.begin(), newFilePath.end()));
 
         // Update the map with the new file path
         fileObjectToPathMap[data->FileObject] = newFilePath;
@@ -314,10 +330,6 @@ static void WINAPI TraceEventRecordCallback(EVENT_RECORD* event) {
         break;
     }
 }
-
-// Global flag to stop the trace thread
-std::atomic<bool> stopTraceThread(false);
-std::thread traceThread;
 
 void TraceProcessThread() {
     // Check the stop condition in a loop or rely on ProcessTrace itself being interruptible
@@ -379,15 +391,15 @@ static BOOL StartTraceSession()
 
     }
     // start processing in background thread using std::thread
-    traceThread = std::thread([]() {
-        TraceProcessThread(); // Call the trace processing function
-        });
+    //traceThread = std::thread([]() {
+    //    TraceProcessThread(); // Call the trace processing function
+    //    });
 
-    // Get the native handle of the thread to use with WaitForSingleObject
-    HANDLE threadHandle = traceThread.native_handle();
+    //// Get the native handle of the thread to use with WaitForSingleObject
 
-    // If you want the thread to block and wait, join it
-    traceThread.join(); // This makes the thread blocking
+    //// If you want the thread to block and wait, join it
+    //traceThread.join();
+    TraceProcessThread();
     return true;
 }
 
@@ -413,27 +425,28 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[1];
 
         if (arg == "--start") {
-            std::cout << "Stopping any existing session and starting a new session...\n";
+            ReadConfig("config.txt");
+            //std::cout << "starting a new session...\n";
             if (StartTraceSession()) {
-                std::cout << "Trace session started successfully.\n";
+               // std::cout << "Trace session started successfully.\n";
             }
             else {
-                std::cerr << "Failed to start the trace session.\n";
+               // std::cerr << "Failed to start the trace session.\n";
                 return 1;  // Return an error code if the trace session fails to start
             }
         }
         else if (arg == "--stop") {
-            std::cout << "Stopping the trace session...\n";
+            //std::cout << "Stopping the trace session...\n";
             StopTraceSession();
-            std::cout << "Trace session stopped successfully.\n";
+            //std::cout << "Trace session stopped successfully.\n";
         }
         else {
-            std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
+           // std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
             return 1;
         }
     }
     else {
-        std::cerr << "No argument provided. Use --start or --stop.\n";
+       // std::cerr << "No argument provided. Use --start or --stop.\n";
         return 1;
     }
     return 0;
