@@ -16,3 +16,4 @@ void WriteDebugLogWithError(const std::wstring& message, DWORD errorCode) {
     OutputDebugStringW(fullMessage.c_str());
     LocalFree(errorMsg);  // Free the buffer allocated by FormatMessage
 }
+

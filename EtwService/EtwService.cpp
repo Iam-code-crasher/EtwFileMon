@@ -17,7 +17,7 @@ void InstallService();
 void UninstallService();
 
 #define SERVICE_NAME  _T("EtwService")
-
+extern HANDLE hProcess;  // Declaration of external variable
 
 // Function to report the current service status
 void ReportServiceStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode, DWORD dwWaitHint) {
@@ -40,6 +40,7 @@ void ReportServiceStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode, DWORD dwWa
     SetServiceStatus(gServiceStatusHandle, &gServiceStatus);
 }
 
+SERVICE_STATUS ServiceStatus;
 // Main service entry function
 void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
     OutputDebugStringW(_T("Starting Service Main"));
@@ -49,10 +50,22 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
         return;
     }
 
-    gServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    gServiceStatus.dwServiceSpecificExitCode = 0;
+    // Initial service state setup
+    ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    ServiceStatus.dwWin32ExitCode = 0;
+    ServiceStatus.dwServiceSpecificExitCode = 0;
+    ServiceStatus.dwCheckPoint = 0;
+    ServiceStatus.dwWaitHint = 0;
 
-    ReportServiceStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
+    SetServiceStatus(gServiceStatusHandle, &ServiceStatus);
+
+    // Running state
+    ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+    SetServiceStatus(gServiceStatusHandle, &ServiceStatus);
+
+    //Start Monitoring Process
+    StartMonitoringProcess();
 
     // Create a stop event to signal service stop
     gServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -74,26 +87,40 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
     CloseHandle(gServiceStopEvent); // Close the stop event handle
 }
 
-// Service control handler function
-void WINAPI ServiceCtrlHandler(DWORD CtrlCode) {
-    switch (CtrlCode) {
+void WINAPI ServiceCtrlHandler(DWORD request) {
+    switch (request) {
     case SERVICE_CONTROL_STOP:
-        if (gServiceStatus.dwCurrentState != SERVICE_RUNNING)
-            break;
+        OutputDebugStringW(_T("Service is stopping..."));
+
+        // Stop the launched executable if it's still running
+        if (hProcess != NULL) {
+            OutputDebugStringW(_T("Terminating child process..."));
+
+            // Gracefully terminate the process (if possible) or force terminate it
+            if (!TerminateProcess(hProcess, 0)) {
+                OutputDebugStringW(_T("Failed to terminate child process."));
+            }
+            else {
+                OutputDebugStringW(_T("Child process terminated successfully."));
+            }
+
+            CloseHandle(hProcess);
+            hProcess = NULL;
+        }
 
         ReportServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 0);
-
+        ReportServiceStatus(SERVICE_STOPPED, NO_ERROR, 0);
         // Signal the service to stop
         SetEvent(gServiceStopEvent);
-
-        ReportServiceStatus(SERVICE_STOPPED, NO_ERROR, 0);
         OutputDebugStringW(_T("Service stopped"));
-        break;
+        return;
 
     default:
         break;
     }
 }
+
+
 
 void InstallService() {
     SC_HANDLE hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
@@ -103,7 +130,7 @@ void InstallService() {
     }
 
     // Get the directory of the service executable and build the path to the monitoring executable
-    std::wstring exePath = L"\"" + GetExecutableDirectory() + L"\\EtwFileMonitor.exe" + L" --start\"";
+    std::wstring serviceExePath = L"\"" + GetExecutableDirectory() + L"\\EtwService.exe\"";
 
     SC_HANDLE hService = CreateService(
         hSCManager,                  // SCM database
@@ -113,7 +140,7 @@ void InstallService() {
         SERVICE_WIN32_OWN_PROCESS,   // Service type
         SERVICE_AUTO_START,          // Start type (automatic start)
         SERVICE_ERROR_NORMAL,        // Error control type
-        exePath.c_str(),             // Path to the service executable
+        serviceExePath.c_str(),             // Path to the service executable
         nullptr,
         nullptr,
         nullptr,
@@ -162,6 +189,7 @@ void UninstallService() {
 
 // Main entry point
 int _tmain(int argc, TCHAR* argv[]) {
+
     if (argc > 1) {
         if (_tcscmp(argv[1], _T("--install")) == 0) {
             InstallService();
@@ -173,6 +201,7 @@ int _tmain(int argc, TCHAR* argv[]) {
         }
     }
 
+
     SERVICE_TABLE_ENTRYW ServiceTable[] = {
         { (LPWSTR)SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain },
         { NULL, NULL }
@@ -181,6 +210,5 @@ int _tmain(int argc, TCHAR* argv[]) {
     if (!StartServiceCtrlDispatcher(ServiceTable)) {
         WriteDebugLogWithError(L"StartServiceCtrlDispatcher failed", GetLastError());
     }
-
     return 0;
 }

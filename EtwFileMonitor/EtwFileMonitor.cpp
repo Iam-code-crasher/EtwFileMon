@@ -61,8 +61,29 @@ struct
 }
 static gTrace;
 
+
+std::string GetExecutableDirectory() {
+    char buffer[MAX_PATH];
+    GetModuleFileNameA(NULL, buffer, MAX_PATH);
+    std::string::size_type pos = std::string(buffer).find_last_of("\\/");
+    return std::string(buffer).substr(0, pos);
+}
+
+
+// Helper function to write logs with error code details
+void WriteDebugLogWithError(const std::string& message, DWORD errorCode) {
+    LPVOID errorMsg;
+    FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL, errorCode, 0, (LPSTR)&errorMsg, 0, NULL);
+    std::string fullMessage = message + " Error: " + std::to_string(errorCode) + " (" + (LPSTR)errorMsg + ")";
+    OutputDebugStringA(fullMessage.c_str());
+    LocalFree(errorMsg);  // Free the buffer allocated by FormatMessage
+}
+
+
 // Function to read configuration (pid and directory) from a file
 bool ReadConfig(const std::string& configFilePath) {
+    WriteDebugLogWithError(std::string("Config Path:") + configFilePath, 0);
     std::ifstream configFile(configFilePath);
     if (!configFile.is_open()) {
         //std::cerr << "Error: Could not open configuration file!" << std::endl;
@@ -158,9 +179,11 @@ std::wstring ConvertNtPathToDosPath(const std::wstring& ntPath) {
 
 // Function to log events
 void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
-    std::ofstream logFile("EtwFileMonitor.log", std::ios_base::app);
+    std::string logFilePath = GetExecutableDirectory() + "\\EtwFileMonitor.log";
+    WriteDebugLogWithError(std::string("Event Log File:") + logFilePath, 0);
+    std::ofstream logFile(logFilePath, std::ios_base::app);
     if (!logFile.is_open()) {
-        std::cerr << "Error: Could not open log file!" << std::endl;
+        WriteDebugLogWithError("Error: Could not open log file!", GetLastError());
         return;
     }
 
@@ -425,7 +448,8 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[1];
 
         if (arg == "--start") {
-            ReadConfig("config.txt");
+            std::string configPath =  GetExecutableDirectory() + "\\config.txt";
+            ReadConfig(configPath);
             //std::cout << "starting a new session...\n";
             if (StartTraceSession()) {
                // std::cout << "Trace session started successfully.\n";
