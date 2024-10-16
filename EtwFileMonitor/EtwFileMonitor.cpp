@@ -81,6 +81,28 @@ void WriteDebugLogWithError(const std::string& message, DWORD errorCode) {
 }
 
 
+// Function to get the process image name (executable name) from a PID
+std::string GetProcessImageName(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (hProcess == NULL) {
+        std::cerr << "Unable to open process with PID " << pid << ". Error: " << GetLastError() << std::endl;
+        return "";
+    }
+
+    char imageName[MAX_PATH];
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameA(hProcess, 0, imageName, &size)) {
+        CloseHandle(hProcess);
+        return std::string(imageName);
+    }
+    else {
+        std::cerr << "Unable to retrieve process image name. Error: " << GetLastError() << std::endl;
+        CloseHandle(hProcess);
+        return "";
+    }
+}
+
+
 // Function to read configuration (pid and directory) from a file
 bool ReadConfig(const std::string& configFilePath) {
     WriteDebugLogWithError(std::string("Config Path:") + configFilePath, 0);
@@ -188,6 +210,7 @@ void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std
     }
 
     logFile << "PID:" << pid
+        << "Image Path:" << GetProcessImageName(pid)
         << ", Event Time: " << eventtime
         << ", Operation: " << operation
         << ", File Path: " << std::string(filePath.begin(), filePath.end())
@@ -197,12 +220,28 @@ void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std
 
     logFile.close();
 }
+// Function to check if a path is a directory
+bool IsDirectory(const std::wstring& path) {
+    DWORD attributes = GetFileAttributesW(path.c_str());
+
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return false; // Path does not exist or there was an error
+    }
+
+    // Check if the path is a directory
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
 
 // Function to check if a given path is under the monitored directory
 bool isPathMonitored(const std::wstring& path) {
     // Ensure both the path and the directory filter are in the same case (lowercase)
     std::wstring lowerPath = path;
     std::wstring lowerDirectoryFilter = gDirectoryFilter;
+
+    //Check if path is directory, don't monitor it
+    if (IsDirectory(path)) {
+        return false;
+    }
 
     // Convert both strings to lowercase to ensure case-insensitive comparison
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
