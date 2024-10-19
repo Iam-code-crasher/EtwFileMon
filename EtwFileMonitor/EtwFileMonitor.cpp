@@ -474,15 +474,6 @@ static BOOL StartTraceSession()
   catch (...) {
 
   }
-  // start processing in background thread using std::thread
-  //traceThread = std::thread([]() {
-  //    TraceProcessThread(); // Call the trace processing function
-  //    });
-
-  //// Get the native handle of the thread to use with WaitForSingleObject
-
-  //// If you want the thread to block and wait, join it
-  //traceThread.join();
   TraceProcessThread();
   return true;
 }
@@ -511,27 +502,28 @@ int main(int argc, char* argv[]) {
     if (arg == "--start") {
       std::string configPath = GetExecutableDirectory() + "\\config.txt";
       ReadConfig(configPath);
-      //std::cout << "starting a new session...\n";
+
+      OutputDebugStringA("starting a new session...");
       if (StartTraceSession()) {
-        // std::cout << "Trace session started successfully.\n";
+        OutputDebugStringA("Trace session started successfully.");
       }
       else {
-        // std::cerr << "Failed to start the trace session.\n";
+        OutputDebugStringA("Failed to start the trace session.");
         return 1;  // Return an error code if the trace session fails to start
       }
     }
     else if (arg == "--stop") {
-      //std::cout << "Stopping the trace session...\n";
+      OutputDebugStringA("Stopping the trace session...");
       StopTraceSession();
-      //std::cout << "Trace session stopped successfully.\n";
+      OutputDebugStringA("Trace session stopped successfully.");
     }
     else {
-      // std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
+      OutputDebugStringA("Invalid argument. Use --start to start the trace and --stop to stop it.");
       return 1;
     }
   }
   else {
-    // std::cerr << "No argument provided. Use --start or --stop.\n";
+    OutputDebugStringA("No argument provided. Use --start or --stop.");
     return 1;
   }
   return 0;

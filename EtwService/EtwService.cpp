@@ -62,8 +62,8 @@ SERVICE_STATUS ServiceStatus;
 // Main service entry function
 void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 
-  // sleep for 30 seconds to allow the debugger to attach
-  Sleep(30000);
+  //// sleep for 30 seconds to allow the debugger to attach
+  //Sleep(30000);
   initServiceStatus();
   OutputDebugStringW(_T("Starting Service Main"));
   gServiceStatusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler); // Use the 'W' version for wide string consistency
