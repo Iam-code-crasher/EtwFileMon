@@ -56,461 +56,483 @@ std::thread traceThread;
 
 struct
 {
-    EVENT_TRACE_PROPERTIES Properties;
-    WCHAR SessionName[1024];
+  EVENT_TRACE_PROPERTIES Properties;
+  WCHAR SessionName[1024];
 }
 static gTrace;
 
 
 std::string GetExecutableDirectory() {
-    char buffer[MAX_PATH];
-    GetModuleFileNameA(NULL, buffer, MAX_PATH);
-    std::string::size_type pos = std::string(buffer).find_last_of("\\/");
-    return std::string(buffer).substr(0, pos);
+  char buffer[MAX_PATH];
+  GetModuleFileNameA(NULL, buffer, MAX_PATH);
+  std::string::size_type pos = std::string(buffer).find_last_of("\\/");
+  return std::string(buffer).substr(0, pos);
 }
 
 
 // Helper function to write logs with error code details
 void WriteDebugLogWithError(const std::string& message, DWORD errorCode) {
-    LPVOID errorMsg;
-    FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL, errorCode, 0, (LPSTR)&errorMsg, 0, NULL);
-    std::string fullMessage = message + " Error: " + std::to_string(errorCode) + " (" + (LPSTR)errorMsg + ")";
-    OutputDebugStringA(fullMessage.c_str());
-    LocalFree(errorMsg);  // Free the buffer allocated by FormatMessage
+  LPVOID errorMsg;
+  FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+    NULL, errorCode, 0, (LPSTR)&errorMsg, 0, NULL);
+  std::string fullMessage = message + " Error: " + std::to_string(errorCode) + " (" + (LPSTR)errorMsg + ")";
+  OutputDebugStringA(fullMessage.c_str());
+  LocalFree(errorMsg);  // Free the buffer allocated by FormatMessage
 }
 
 
 // Function to get the process image name (executable name) from a PID
 std::string GetProcessImageName(DWORD pid) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (hProcess == NULL) {
-        std::cerr << "Unable to open process with PID " << pid << ". Error: " << GetLastError() << std::endl;
-        return "";
-    }
+  HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+  if (hProcess == NULL) {
+    std::cerr << "Unable to open process with PID " << pid << ". Error: " << GetLastError() << std::endl;
+    return "";
+  }
 
-    char imageName[MAX_PATH];
-    DWORD size = MAX_PATH;
-    if (QueryFullProcessImageNameA(hProcess, 0, imageName, &size)) {
-        CloseHandle(hProcess);
-        return std::string(imageName);
-    }
-    else {
-        std::cerr << "Unable to retrieve process image name. Error: " << GetLastError() << std::endl;
-        CloseHandle(hProcess);
-        return "";
-    }
+  char imageName[MAX_PATH];
+  DWORD size = MAX_PATH;
+  if (QueryFullProcessImageNameA(hProcess, 0, imageName, &size)) {
+    CloseHandle(hProcess);
+    return std::string(imageName);
+  }
+  else {
+    std::cerr << "Unable to retrieve process image name. Error: " << GetLastError() << std::endl;
+    CloseHandle(hProcess);
+    return "";
+  }
 }
 
 
 // Function to read configuration (pid and directory) from a file
 bool ReadConfig(const std::string& configFilePath) {
-    WriteDebugLogWithError(std::string("Config Path:") + configFilePath, 0);
-    std::ifstream configFile(configFilePath);
-    if (!configFile.is_open()) {
-        //std::cerr << "Error: Could not open configuration file!" << std::endl;
-        return false;
+  WriteDebugLogWithError(std::string("Config Path:") + configFilePath, 0);
+  std::ifstream configFile(configFilePath);
+  if (!configFile.is_open()) {
+    //std::cerr << "Error: Could not open configuration file!" << std::endl;
+    return false;
+  }
+
+  std::string line;
+  while (std::getline(configFile, line)) {
+
+    if (line.find("directory=") == 0) {
+      gDirectoryFilter = std::wstring(line.begin() + 10, line.end()); // Extract directory
     }
+  }
 
-    std::string line;
-    while (std::getline(configFile, line)) {
-
-        if (line.find("directory=") == 0) {
-            gDirectoryFilter = std::wstring(line.begin() + 10, line.end()); // Extract directory
-        }
-    }
-
-    configFile.close();
-    return true;
+  configFile.close();
+  return true;
 }
 
 
 // check if current process is elevated
 static BOOL IsElevated(void)
 {
-    BOOL result = FALSE;
+  BOOL result = FALSE;
 
-    HANDLE token;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+  HANDLE token;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+  {
+    TOKEN_ELEVATION elevation{};
+    DWORD size;
+    if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size))
     {
-        TOKEN_ELEVATION elevation{};
-        DWORD size;
-        if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size))
-        {
-            result = elevation.TokenIsElevated;
-        }
-        CloseHandle(token);
+      result = elevation.TokenIsElevated;
     }
+    CloseHandle(token);
+  }
 
-    return result;
+  return result;
 }
 
 // enables profiling privilege
 static BOOL EnableProfilePrivilge(void)
 {
-    BOOL result = FALSE;
+  BOOL result = FALSE;
 
-    HANDLE token;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
+  HANDLE token;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
+  {
+    LUID luid;
+    if (LookupPrivilegeValue(NULL, SE_SYSTEM_PROFILE_NAME, &luid))
     {
-        LUID luid;
-        if (LookupPrivilegeValue(NULL, SE_SYSTEM_PROFILE_NAME, &luid))
-        {
-            TOKEN_PRIVILEGES tp{};
-            {
-                tp.PrivilegeCount = 1;
-                tp.Privileges[0].Luid = luid;
-                tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-            }
-            if (AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), NULL, NULL))
-            {
-                result = TRUE;
-            }
-        }
-        CloseHandle(token);
+      TOKEN_PRIVILEGES tp{};
+      {
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+      }
+      if (AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), NULL, NULL))
+      {
+        result = TRUE;
+      }
     }
+    CloseHandle(token);
+  }
 
-    return result;
+  return result;
 }
 // Function to convert NT-style device paths to DOS-style paths
 std::wstring ConvertNtPathToDosPath(const std::wstring& ntPath) {
-    // Buffer to store the result of QueryDosDeviceW
-    wchar_t deviceName[MAX_PATH] = { 0 };
-    wchar_t driveLetter[3] = L"A:";
-    std::wstring dosPath = ntPath;
+  // Buffer to store the result of QueryDosDeviceW
+  wchar_t deviceName[MAX_PATH] = { 0 };
+  wchar_t driveLetter[3] = L"A:";
+  std::wstring dosPath = ntPath;
 
-    // Iterate through the possible drive letters (A-Z)
-    for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
-        driveLetter[0] = letter;
+  // Iterate through the possible drive letters (A-Z)
+  for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
+    driveLetter[0] = letter;
 
-        // QueryDosDeviceW maps DOS drive letters to their NT device names
-        if (QueryDosDeviceW(driveLetter, deviceName, MAX_PATH)) {
-            size_t deviceNameLen = wcslen(deviceName);
+    // QueryDosDeviceW maps DOS drive letters to their NT device names
+    if (QueryDosDeviceW(driveLetter, deviceName, MAX_PATH)) {
+      size_t deviceNameLen = wcslen(deviceName);
 
-            // If the NT path starts with the device name, replace it with the drive letter
-            if (ntPath.find(deviceName) == 0) {
-                dosPath.replace(0, deviceNameLen, driveLetter);
-                break;
-            }
-        }
+      // If the NT path starts with the device name, replace it with the drive letter
+      if (ntPath.find(deviceName) == 0) {
+        dosPath.replace(0, deviceNameLen, driveLetter);
+        break;
+      }
     }
+  }
 
-    return dosPath; // Return the converted DOS path
+  return dosPath; // Return the converted DOS path
+}
+
+bool IsSameProcess(DWORD pid) {
+  // Get the current process ID
+  DWORD currentPid = GetCurrentProcessId();
+
+  // Compare the given pid with the current process's pid
+  return (pid == currentPid);
 }
 
 
 // Function to log events
 void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
-    std::string logFilePath = GetExecutableDirectory() + "\\EtwFileMonitor.log";
-    WriteDebugLogWithError(std::string("Event Log File:") + logFilePath, 0);
-    std::ofstream logFile(logFilePath, std::ios_base::app);
-    if (!logFile.is_open()) {
-        WriteDebugLogWithError("Error: Could not open log file!", GetLastError());
-        return;
-    }
 
-    logFile << "PID:" << pid
-        << "Image Path:" << GetProcessImageName(pid)
-        << ", Event Time: " << eventtime
-        << ", Operation: " << operation
-        << ", File Path: " << std::string(filePath.begin(), filePath.end())
-        << ", Length: " << length
-        << ", Offset: " << offset
-        << std::endl;
+  //Don't log events from the same process
+  if (IsSameProcess(pid)) {
+    return;
+  }
 
-    logFile.close();
+  std::string logFilePath = GetExecutableDirectory() + "\\EtwFileMonitor.log";
+  WriteDebugLogWithError(std::string("Event Log File:") + logFilePath, 0);
+  std::ofstream logFile(logFilePath, std::ios_base::app);
+  if (!logFile.is_open()) {
+    WriteDebugLogWithError("Error: Could not open log file!", GetLastError());
+    return;
+  }
+
+  logFile << "PID:" << pid
+    << ", PPath:" << GetProcessImageName(pid)
+    << ", Event Time: " << eventtime
+    << ", Operation: " << operation
+    << ", File Path: " << std::string(filePath.begin(), filePath.end())
+    << ", Length: " << length
+    << ", Offset: " << offset
+    << std::endl;
+
+  logFile.close();
 }
 // Function to check if a path is a directory
 bool IsDirectory(const std::wstring& path) {
-    DWORD attributes = GetFileAttributesW(path.c_str());
+  DWORD attributes = GetFileAttributesW(path.c_str());
 
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return false; // Path does not exist or there was an error
-    }
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    return false; // Path does not exist or there was an error
+  }
 
-    // Check if the path is a directory
-    return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  // Check if the path is a directory
+  return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 // Function to check if a given path is under the monitored directory
 bool isPathMonitored(const std::wstring& path) {
-    // Ensure both the path and the directory filter are in the same case (lowercase)
-    std::wstring lowerPath = path;
-    std::wstring lowerDirectoryFilter = gDirectoryFilter;
+  // Ensure both the path and the directory filter are in the same case (lowercase)
+  std::wstring lowerPath = path;
+  std::wstring lowerDirectoryFilter = gDirectoryFilter;
 
-    //Check if path is directory, don't monitor it
-    if (IsDirectory(path)) {
-        return false;
-    }
+  //Check if path is directory, don't monitor it
+  if (IsDirectory(path)) {
+    return false;
+  }
 
-    // Convert both strings to lowercase to ensure case-insensitive comparison
-    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
-    std::transform(lowerDirectoryFilter.begin(), lowerDirectoryFilter.end(), lowerDirectoryFilter.begin(), ::towlower);
+  // Convert both strings to lowercase to ensure case-insensitive comparison
+  std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+  std::transform(lowerDirectoryFilter.begin(), lowerDirectoryFilter.end(), lowerDirectoryFilter.begin(), ::towlower);
 
-    // Check if the monitored directory is a prefix of the path
-    return lowerPath.find(lowerDirectoryFilter) == 0;
+  // Check if the monitored directory is a prefix of the path
+  return lowerPath.find(lowerDirectoryFilter) == 0;
 }
 // Number of 100-nanosecond intervals between January 1, 1601 and January 1, 1970
 #define EPOCH_DIFFERENCE 11644473600LL
 
 // Function to convert FILETIME to Unix Epoch Time (seconds since 1970)
 time_t FileTimeToEpoch(const LARGE_INTEGER& fileTime) {
-    // Convert the timestamp from 100-nanosecond intervals to seconds
-    time_t epochTime = (fileTime.QuadPart / 10000000LL) - EPOCH_DIFFERENCE;
-    return epochTime;
+  // Convert the timestamp from 100-nanosecond intervals to seconds
+  time_t epochTime = (fileTime.QuadPart / 10000000LL) - EPOCH_DIFFERENCE;
+  return epochTime;
 }
 
 // Function to handle File Create events
 void HandleFileCreate(EVENT_RECORD* event) {
-    const UCHAR version = event->EventHeader.EventDescriptor.Version;
+  const UCHAR version = event->EventHeader.EventDescriptor.Version;
 
-    // Lambda function to handle common code for file creation
-    auto handleCreateEvent = [&](const auto* data) {
-        const std::wstring ntPath(data->OpenPath);
-        const std::wstring dosPath = ConvertNtPathToDosPath(ntPath);
-        if (!isPathMonitored(dosPath)) {
-            return;
-        }
+  // Lambda function to handle common code for file creation
+  auto handleCreateEvent = [&](const auto* data) {
+    const std::wstring ntPath(data->OpenPath);
+    const std::wstring dosPath = ConvertNtPathToDosPath(ntPath);
+    if (!isPathMonitored(dosPath)) {
+      return;
+    }
 
-        // Use std::unique_ptr if dynamic memory allocation is needed later
-        // Example: std::unique_ptr<std::wstring> dosPathPtr = std::make_unique<std::wstring>(dosPath);
+    // Use std::unique_ptr if dynamic memory allocation is needed later
+    // Example: std::unique_ptr<std::wstring> dosPathPtr = std::make_unique<std::wstring>(dosPath);
 
-        // Store the path in the map using IrpPtr as the key
-        fileObjectToPathMap[data->IrpPtr] = dosPath;
+    // Store the path in the map using IrpPtr as the key
+    fileObjectToPathMap[data->IrpPtr] = dosPath;
 
-        // Log the file creation event
-        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, dosPath, "Create");
+    // Log the file creation event
+    WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, dosPath, "Create");
     };
 
-    // Handle based on version
-    if (version >= 3) {
-        const auto* data = static_cast<PFILEIO_V3_CREATE>(event->UserData);
-        handleCreateEvent(data);
-    }
-    else {
-        const auto* data = static_cast<PFILEIO_V2_CREATE>(event->UserData);
-        handleCreateEvent(data);
-    }
+  // Handle based on version
+  if (version >= 3) {
+    const auto* data = static_cast<PFILEIO_V3_CREATE>(event->UserData);
+    handleCreateEvent(data);
+  }
+  else {
+    const auto* data = static_cast<PFILEIO_V2_CREATE>(event->UserData);
+    handleCreateEvent(data);
+  }
 }
 
 // Function to handle File Read events
 void HandleFileRead(EVENT_RECORD* event) {
-    struct FileIo_Read* data = (FileIo_Read*)event->UserData;
+  struct FileIo_Read* data = (FileIo_Read*)event->UserData;
 
-    // Find the file path in the map using FileObject
-    auto it = fileObjectToPathMap.find(data->FileObject);
-    if (it != fileObjectToPathMap.end()) {
-        std::wstring filePath = it->second;
-
-        // Log the read event
-        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Read", data->Length, data->Offset);
+  // Find the file path in the map using FileObject
+  auto it = fileObjectToPathMap.find(data->FileObject);
+  if (it != fileObjectToPathMap.end()) {
+    std::wstring filePath = it->second;
+    if (!isPathMonitored(filePath)) {
+      return;
     }
+    // Log the read event
+    WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Read", data->Length, data->Offset);
+  }
 }
 
 // Function to handle File Write events
 void HandleFileWrite(EVENT_RECORD* event) {
-    struct FileIo_Write* data = (FileIo_Write*)event->UserData;
+  struct FileIo_Write* data = (FileIo_Write*)event->UserData;
 
-    // Find the file path in the map using FileObject
-    auto it = fileObjectToPathMap.find(data->FileObject);
-    if (it != fileObjectToPathMap.end()) {
-        std::wstring filePath = it->second;
-
-        // Log the write event
-        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Write", data->Length, data->Offset);
+  // Find the file path in the map using FileObject
+  auto it = fileObjectToPathMap.find(data->FileObject);
+  if (it != fileObjectToPathMap.end()) {
+    std::wstring filePath = it->second;
+    if (!isPathMonitored(filePath)) {
+      return;
     }
+    // Log the write event
+    WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Write", data->Length, data->Offset);
+  }
 }
 
 // Function to handle File Delete events
 void HandleFileDelete(EVENT_RECORD* event) {
-    struct FileIo_Delete* data = (FileIo_Delete*)event->UserData;
+  struct FileIo_Delete* data = (FileIo_Delete*)event->UserData;
 
-    // Find the file path in the map using FileObject
-    auto it = fileObjectToPathMap.find(data->FileObject);
-    if (it != fileObjectToPathMap.end()) {
-        std::wstring filePath = it->second;
-
-        // Log the delete event
-        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Delete");
-
-        // Remove the fileObject from the map
-        fileObjectToPathMap.erase(it);
+  // Find the file path in the map using FileObject
+  auto it = fileObjectToPathMap.find(data->FileObject);
+  if (it != fileObjectToPathMap.end()) {
+    std::wstring filePath = it->second;
+    if (!isPathMonitored(filePath)) {
+      return;
     }
+    // Log the delete event
+    WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, filePath, "Delete");
+
+    // Remove the fileObject from the map
+    fileObjectToPathMap.erase(it);
+  }
 }
 
 // Function to handle File Rename events
 void HandleFileRename(EVENT_RECORD* event) {
-    struct FileIo_Rename* data = (FileIo_Rename*)event->UserData;
+  struct FileIo_Rename* data = (FileIo_Rename*)event->UserData;
 
-    // Find the old file path in the map using FileObject
-    auto it = fileObjectToPathMap.find(data->FileObject);
-    if (it != fileObjectToPathMap.end()) {
-        std::wstring oldFilePath = it->second;
-        std::wstring newFilePath = ConvertNtPathToDosPath(data->NewName);
-
-        // Log the rename event
-        WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, oldFilePath, "Rename to " + std::string(newFilePath.begin(), newFilePath.end()));
-
-        // Update the map with the new file path
-        fileObjectToPathMap[data->FileObject] = newFilePath;
+  // Find the old file path in the map using FileObject
+  auto it = fileObjectToPathMap.find(data->FileObject);
+  if (it != fileObjectToPathMap.end()) {
+    std::wstring oldFilePath = it->second;
+    std::wstring newFilePath = ConvertNtPathToDosPath(data->NewName);
+    if (!isPathMonitored(oldFilePath)) {
+      return;
     }
+    // Log the rename event
+    WriteToLog(event->EventHeader.ProcessId, FileTimeToEpoch(event->EventHeader.TimeStamp), data->FileObject, oldFilePath, "Rename to " + std::string(newFilePath.begin(), newFilePath.end()));
+
+    // Update the map with the new file path
+    fileObjectToPathMap[data->FileObject] = newFilePath;
+  }
 }
 
 // Function to handle File Close events
 void HandleFileClose(EVENT_RECORD* event) {
-    uint64_t fileObject = ((PFILEIO_V3_CREATE)event->UserData)->FileObject;
+  uint64_t fileObject = ((PFILEIO_V3_CREATE)event->UserData)->FileObject;
 
-    // Remove the fileObject from the map
-    fileObjectToPathMap.erase(fileObject);
+  // Remove the fileObject from the map
+  fileObjectToPathMap.erase(fileObject);
 }
 
 // Main event handler for ETW
 static void WINAPI TraceEventRecordCallback(EVENT_RECORD* event) {
-    DWORD pid = event->EventHeader.ProcessId;
-    UCHAR opcode = event->EventHeader.EventDescriptor.Opcode;
+  DWORD pid = event->EventHeader.ProcessId;
+  UCHAR opcode = event->EventHeader.EventDescriptor.Opcode;
 
-    switch (opcode) {
-    case PERFINFO_LOG_TYPE_FILE_IO_CREATE:
-        HandleFileCreate(event);
-        break;
-    case PERFINFO_LOG_TYPE_FILE_IO_READ:
-        HandleFileRead(event);
-        break;
-    case PERFINFO_LOG_TYPE_FILE_IO_WRITE:
-        HandleFileWrite(event);
-        break;
-    case PERFINFO_LOG_TYPE_FILE_IO_DELETE:
-        HandleFileDelete(event);
-        break;
-    case PERFINFO_LOG_TYPE_FILE_IO_RENAME:
-        HandleFileRename(event);
-        break;
-    case PERFINFO_LOG_TYPE_FILE_IO_CLOSE:
-        HandleFileClose(event);
-        break;
-    default:
-        break;
-    }
+  switch (opcode) {
+  case PERFINFO_LOG_TYPE_FILE_IO_CREATE:
+    HandleFileCreate(event);
+    break;
+  case PERFINFO_LOG_TYPE_FILE_IO_READ:
+    HandleFileRead(event);
+    break;
+  case PERFINFO_LOG_TYPE_FILE_IO_WRITE:
+    HandleFileWrite(event);
+    break;
+  case PERFINFO_LOG_TYPE_FILE_IO_DELETE:
+    HandleFileDelete(event);
+    break;
+  case PERFINFO_LOG_TYPE_FILE_IO_RENAME:
+    HandleFileRename(event);
+    break;
+  case PERFINFO_LOG_TYPE_FILE_IO_CLOSE:
+    HandleFileClose(event);
+    break;
+  default:
+    break;
+  }
 }
 
 void TraceProcessThread() {
-    // Check the stop condition in a loop or rely on ProcessTrace itself being interruptible
-    while (!stopTraceThread.load()) {
-        ProcessTrace(&gTraceHandle, 1, NULL, NULL);
-    }
+  // Check the stop condition in a loop or rely on ProcessTrace itself being interruptible
+  while (!stopTraceThread.load()) {
+    ProcessTrace(&gTraceHandle, 1, NULL, NULL);
+  }
 }
 
 static BOOL StartTraceSession()
 {
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
+  SYSTEM_INFO sysinfo;
+  GetSystemInfo(&sysinfo);
 
-    EVENT_TRACE_PROPERTIES* p = &gTrace.Properties;
+  EVENT_TRACE_PROPERTIES* p = &gTrace.Properties;
 
-    // stop existing trace, in case it is running
-    ZeroMemory(p, sizeof(*p));
-    p->Wnode.BufferSize = sizeof(gTrace);
-    p->Wnode.Guid = SystemTraceControlGuid;
-    p->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-    p->LoggerNameOffset = sizeof(gTrace.Properties);
-    ControlTraceW(0, KERNEL_LOGGER_NAMEW, p, EVENT_TRACE_CONTROL_STOP);
+  // stop existing trace, in case it is running
+  ZeroMemory(p, sizeof(*p));
+  p->Wnode.BufferSize = sizeof(gTrace);
+  p->Wnode.Guid = SystemTraceControlGuid;
+  p->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+  p->LoggerNameOffset = sizeof(gTrace.Properties);
+  ControlTraceW(0, KERNEL_LOGGER_NAMEW, p, EVENT_TRACE_CONTROL_STOP);
 
-    // setup trace properties
-    ZeroMemory(p, sizeof(*p));
-    p->Wnode.BufferSize = sizeof(gTrace);
-    p->Wnode.Guid = SystemTraceControlGuid;
-    p->Wnode.ClientContext = 1;
-    p->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-    p->BufferSize = 1024; // 1MiB
-    p->MinimumBuffers = 2 * sysinfo.dwNumberOfProcessors;
-    p->MaximumBuffers = p->MinimumBuffers + 20;
-    p->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
-    p->LoggerNameOffset = sizeof(gTrace.Properties);
-    p->FlushTimer = 1;
-    p->EnableFlags = EVENT_TRACE_FLAG_FILE_IO_INIT;
+  // setup trace properties
+  ZeroMemory(p, sizeof(*p));
+  p->Wnode.BufferSize = sizeof(gTrace);
+  p->Wnode.Guid = SystemTraceControlGuid;
+  p->Wnode.ClientContext = 1;
+  p->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+  p->BufferSize = 1024; // 1MiB
+  p->MinimumBuffers = 2 * sysinfo.dwNumberOfProcessors;
+  p->MaximumBuffers = p->MinimumBuffers + 20;
+  p->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+  p->LoggerNameOffset = sizeof(gTrace.Properties);
+  p->FlushTimer = 1;
+  p->EnableFlags = EVENT_TRACE_FLAG_FILE_IO_INIT;
 
-    // start the trace
-    TRACEHANDLE session;
-    if (StartTraceW(&session, KERNEL_LOGGER_NAMEW, p) != ERROR_SUCCESS)
+  // start the trace
+  TRACEHANDLE session;
+  if (StartTraceW(&session, KERNEL_LOGGER_NAMEW, p) != ERROR_SUCCESS)
+  {
+    return FALSE;
+  }
+
+  EVENT_TRACE_LOGFILEW logfile = {};
+  logfile.LoggerName = (LPWSTR)KERNEL_LOGGER_NAMEW;
+  logfile.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP | PROCESS_TRACE_MODE_REAL_TIME;
+  logfile.EventRecordCallback = TraceEventRecordCallback;
+  try {
+    // open trace for processing
+    gTraceHandle = OpenTraceW(&logfile);
+    if (gTraceHandle == INVALID_PROCESSTRACE_HANDLE)
     {
-        return FALSE;
+      ControlTraceW(0, KERNEL_LOGGER_NAMEW, p, EVENT_TRACE_CONTROL_STOP);
+      return FALSE;
     }
+  }
+  catch (...) {
 
-    EVENT_TRACE_LOGFILEW logfile = {};
-    logfile.LoggerName = (LPWSTR)KERNEL_LOGGER_NAMEW;
-    logfile.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP | PROCESS_TRACE_MODE_REAL_TIME;
-    logfile.EventRecordCallback = TraceEventRecordCallback;
-    try {
-        // open trace for processing
-        gTraceHandle = OpenTraceW(&logfile);
-        if (gTraceHandle == INVALID_PROCESSTRACE_HANDLE)
-        {
-            ControlTraceW(0, KERNEL_LOGGER_NAMEW, p, EVENT_TRACE_CONTROL_STOP);
-            return FALSE;
-        }
-    }
-    catch (...) {
+  }
+  // start processing in background thread using std::thread
+  //traceThread = std::thread([]() {
+  //    TraceProcessThread(); // Call the trace processing function
+  //    });
 
-    }
-    // start processing in background thread using std::thread
-    //traceThread = std::thread([]() {
-    //    TraceProcessThread(); // Call the trace processing function
-    //    });
+  //// Get the native handle of the thread to use with WaitForSingleObject
 
-    //// Get the native handle of the thread to use with WaitForSingleObject
-
-    //// If you want the thread to block and wait, join it
-    //traceThread.join();
-    TraceProcessThread();
-    return true;
+  //// If you want the thread to block and wait, join it
+  //traceThread.join();
+  TraceProcessThread();
+  return true;
 }
 
 static void StopTraceSession(void)
 {
-    // Signal the trace thread to stop
-    stopTraceThread.store(true);
+  // Signal the trace thread to stop
+  stopTraceThread.store(true);
 
-    // Stop the ETW trace session
-    ControlTraceW(0, KERNEL_LOGGER_NAMEW, &gTrace.Properties, EVENT_TRACE_CONTROL_STOP);
+  // Stop the ETW trace session
+  ControlTraceW(0, KERNEL_LOGGER_NAMEW, &gTrace.Properties, EVENT_TRACE_CONTROL_STOP);
 
-    // Wait for the trace thread to finish (join it)
-    if (traceThread.joinable()) {
-        traceThread.join(); // Wait for the thread to complete
-    }
+  // Wait for the trace thread to finish (join it)
+  if (traceThread.joinable()) {
+    traceThread.join(); // Wait for the thread to complete
+  }
 
-    // Close the trace handle
-    CloseTrace(gTraceHandle);
+  // Close the trace handle
+  CloseTrace(gTraceHandle);
 }
 
 int main(int argc, char* argv[]) {
-    if (argc > 1) {
-        std::string arg = argv[1];
+  if (argc > 1) {
+    std::string arg = argv[1];
 
-        if (arg == "--start") {
-            std::string configPath =  GetExecutableDirectory() + "\\config.txt";
-            ReadConfig(configPath);
-            //std::cout << "starting a new session...\n";
-            if (StartTraceSession()) {
-               // std::cout << "Trace session started successfully.\n";
-            }
-            else {
-               // std::cerr << "Failed to start the trace session.\n";
-                return 1;  // Return an error code if the trace session fails to start
-            }
-        }
-        else if (arg == "--stop") {
-            //std::cout << "Stopping the trace session...\n";
-            StopTraceSession();
-            //std::cout << "Trace session stopped successfully.\n";
-        }
-        else {
-           // std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
-            return 1;
-        }
+    if (arg == "--start") {
+      std::string configPath = GetExecutableDirectory() + "\\config.txt";
+      ReadConfig(configPath);
+      //std::cout << "starting a new session...\n";
+      if (StartTraceSession()) {
+        // std::cout << "Trace session started successfully.\n";
+      }
+      else {
+        // std::cerr << "Failed to start the trace session.\n";
+        return 1;  // Return an error code if the trace session fails to start
+      }
+    }
+    else if (arg == "--stop") {
+      //std::cout << "Stopping the trace session...\n";
+      StopTraceSession();
+      //std::cout << "Trace session stopped successfully.\n";
     }
     else {
-       // std::cerr << "No argument provided. Use --start or --stop.\n";
-        return 1;
+      // std::cerr << "Invalid argument. Use --start to start the trace and --stop to stop it.\n";
+      return 1;
     }
-    return 0;
+  }
+  else {
+    // std::cerr << "No argument provided. Use --start or --stop.\n";
+    return 1;
+  }
+  return 0;
 }

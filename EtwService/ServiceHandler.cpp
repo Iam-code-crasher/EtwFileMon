@@ -1,4 +1,5 @@
 #include "Common.h"
+#include <string>
 
 HANDLE hProcess = NULL;  // Definition of global variable
 // Function to start the monitoring process
@@ -7,11 +8,13 @@ void StartMonitoringProcess() {
     PROCESS_INFORMATION pi;
     
     // Get the directory of the service executable and build the path to the monitoring executable
-    std::wstring exePath = GetExecutableDirectory() + L"\\EtwFileMonitor.exe --start";
+    std::wstring exePath =std::wstring(L"\"") + GetExecutableDirectory() + std::wstring(L"\\EtwFileMonitor.exe\"") + L" --start";
     std::wstring workingDir = GetExecutableDirectory();
+    WriteDebugLogWithError(std::wstring(L"Launching:") + exePath, 0);
+    WriteDebugLogWithError(std::wstring(L"Working Dir:") + workingDir, 0);
 
     if (!CreateProcess(NULL, (LPWSTR)exePath.c_str(), NULL, NULL, FALSE, 0, NULL, workingDir.c_str(), &si, &pi)) {
-        WriteDebugLogWithError(L"Failed to launch executable.", GetLastError());
+       
         return;
     }
 
