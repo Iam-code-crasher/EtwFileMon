@@ -178,6 +178,14 @@ void InstallService() {
 
   WriteDebugLogWithError(L"Service installed successfully.", GetLastError());
 
+  // Start the service immediately after installation
+  if (!StartService(hService, 0, NULL)) {
+    WriteDebugLogWithError(L"Failed to start service after installation. Error: ", GetLastError());
+  }
+  else {
+    WriteDebugLogWithError(L"Service started successfully after installation.", 0);
+  }
+
   // Cleanup
   CloseServiceHandle(hService);
   CloseServiceHandle(hSCManager);

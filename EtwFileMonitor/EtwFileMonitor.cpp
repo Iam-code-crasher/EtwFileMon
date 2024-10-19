@@ -207,6 +207,55 @@ bool IsSameProcess(DWORD pid) {
 }
 
 
+std::string GetUserFromProcessId(DWORD processId) {
+  HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+  if (hProcess == NULL) {
+    std::wcerr << L"Failed to open process with PID: " << processId << L", Error: " << GetLastError() << std::endl;
+    return "Unknown";
+  }
+
+  HANDLE hToken = NULL;
+  if (!OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
+    CloseHandle(hProcess);
+    std::wcerr << L"Failed to open process token, Error: " << GetLastError() << std::endl;
+    return "Unknown";
+  }
+
+  // Get token information length first
+  DWORD tokenInfoLength = 0;
+  GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenInfoLength);
+  std::unique_ptr<BYTE[]> tokenInfo(new BYTE[tokenInfoLength]);
+
+  // Now get the token information
+  if (!GetTokenInformation(hToken, TokenUser, tokenInfo.get(), tokenInfoLength, &tokenInfoLength)) {
+    std::wcerr << L"Failed to get token information, Error: " << GetLastError() << std::endl;
+    CloseHandle(hToken);
+    CloseHandle(hProcess);
+    return "Unknown";
+  }
+
+  // Extract the SID from the token
+  PSID userSid = reinterpret_cast<TOKEN_USER*>(tokenInfo.get())->User.Sid;
+
+  // Convert SID to a human-readable account name
+  CHAR accountName[256], domainName[256];
+  DWORD accountNameLen = 256, domainNameLen = 256;
+  SID_NAME_USE sidType;
+  if (!LookupAccountSidA(NULL, userSid, accountName, &accountNameLen, domainName, &domainNameLen, &sidType)) {
+    std::wcerr << L"Failed to lookup account SID, Error: " << GetLastError() << std::endl;
+    CloseHandle(hToken);
+    CloseHandle(hProcess);
+    return "Unknown";
+  }
+
+  // Close handles
+  CloseHandle(hToken);
+  CloseHandle(hProcess);
+
+  // Return the domain\username as a wstring
+  return std::string(domainName) + "\\" + std::string(accountName);
+}
+
 // Function to log events
 void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std::wstring& filePath, const std::string& operation, uint32_t length = 0, uint64_t offset = 0) {
 
@@ -216,20 +265,19 @@ void WriteToLog(uint32_t pid, uint64_t eventtime, uint64_t FileObject, const std
   }
 
   std::string logFilePath = GetExecutableDirectory() + "\\EtwFileMonitor.log";
-  WriteDebugLogWithError(std::string("Event Log File:") + logFilePath, 0);
+//WriteDebugLogWithError(std::string("Event Log File:") + logFilePath, 0);
   std::ofstream logFile(logFilePath, std::ios_base::app);
   if (!logFile.is_open()) {
     WriteDebugLogWithError("Error: Could not open log file!", GetLastError());
     return;
   }
 
-  logFile << "PID:" << pid
-    << ", PPath:" << GetProcessImageName(pid)
-    << ", Event Time: " << eventtime
+  logFile << "Event Time : " << eventtime
     << ", Operation: " << operation
     << ", File Path: " << std::string(filePath.begin(), filePath.end())
-    << ", Length: " << length
-    << ", Offset: " << offset
+    << ", PID:" << pid
+    << ", User:" << GetUserFromProcessId(pid)
+    << ", PPath:" << GetProcessImageName(pid)
     << std::endl;
 
   logFile.close();
@@ -273,6 +321,7 @@ time_t FileTimeToEpoch(const LARGE_INTEGER& fileTime) {
   time_t epochTime = (fileTime.QuadPart / 10000000LL) - EPOCH_DIFFERENCE;
   return epochTime;
 }
+
 
 // Function to handle File Create events
 void HandleFileCreate(EVENT_RECORD* event) {
